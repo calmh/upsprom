@@ -40,13 +40,27 @@ func process(upsdAddr string) error {
 	}
 	defer conn.Close()
 
-	br := bufio.NewScanner(conn)
+	log.Println("Connected to", conn.RemoteAddr())
+
+	br := bufio.NewReader(conn)
 
 	var ups []string
-	fmt.Fprintf(conn, "LIST UPS\n")
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(conn, "LIST UPS\n"); err != nil {
+		return err
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return err
+	}
 upsList:
-	for br.Scan() {
-		line := br.Text()
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return err
+		}
 		fields := strings.Fields(line)
 		switch fields[0] {
 		case "UPS":
@@ -55,18 +69,29 @@ upsList:
 			break upsList
 		}
 	}
-	if br.Err() != nil {
-		return br.Err()
-	}
+
+	log.Println("Got list of UPSs:", ups)
 
 	vars := make(map[string]*prometheus.GaugeVec)
-
 	for {
 	varList:
 		for _, u := range ups {
-			fmt.Fprintf(conn, "LIST VAR %s\n", u)
-			for br.Scan() {
-				line := br.Text()
+			if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(conn, "LIST VAR %s\n", u); err != nil {
+				return err
+			}
+
+			if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+				return err
+			}
+			for {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					return err
+				}
+
 				fields := strings.Fields(line)
 				switch fields[0] {
 				case "VAR":
@@ -75,7 +100,9 @@ upsList:
 					if fval, err := strconv.ParseFloat(val, 64); err == nil {
 						if _, ok := vars[key]; !ok {
 							vars[key] = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: key}, []string{"ups"})
-							prometheus.MustRegister(vars[key])
+							if err := prometheus.Register(vars[key]); err != nil {
+								log.Println("Error registering", key, ":", err)
+							}
 						}
 						vars[key].WithLabelValues(u).Set(fval)
 					}
@@ -83,10 +110,7 @@ upsList:
 					break varList
 				}
 			}
-			if br.Err() != nil {
-				return br.Err()
-			}
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(15 * time.Second)
 	}
 }
